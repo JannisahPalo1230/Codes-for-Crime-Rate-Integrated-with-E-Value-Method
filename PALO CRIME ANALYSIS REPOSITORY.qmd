@@ -1,0 +1,513 @@
+---
+title: "Appendix: R Code for Crime Analysis"
+author: "Jannisah M. Palo"
+format: pdf
+editor: visual
+warning: false
+---
+
+# Appendix: R Code
+
+## A.1 Data Loading and Preparation
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(fixest)
+library(EValue)
+
+# Load dataset
+crime <- read_csv("crime_dataset.csv",
+  col_types = cols(DRUGS = col_number())
+)
+
+# Parse dates
+crime$Date <- dmy(crime$Date)
+
+# Restrict to study period: July 2013 – March 2020
+crime <- crime %>%
+  filter(Date >= as.Date("2013-07-01") & Date <= as.Date("2020-03-08"))
+
+# Post-intervention indicator (July 1, 2016 onwards)
+crime$post <- ifelse(crime$Date >= as.Date("2016-07-01"), 1, 0)
+```
+
+------------------------------------------------------------------------
+
+## A.2 Variable Construction
+
+### Treatment Variable
+
+```{r}
+# Drug crime rate (share of total crimes)
+crime <- crime %>%
+  mutate(
+    drug_rate = DRUGS / `GRAND TOTAL`
+  )
+```
+
+### Control Variable
+
+```{r}
+# Aggregate non-drug crimes
+crime <- crime %>%
+  mutate(
+    non_drug_total =
+      `THEFT  - RPC Art. 308` +
+      `ROBBERY  - RPC Art. 293` +
+      `QUALIFIED THEFT  - RPC Art. 310  as amended by BP Blg 71` +
+      `HIGHWAY ROBBERY` +
+      `SWINDLING (ESTAFA)  - RPC Art. 315 as amended by PD 1689` +
+      `OTHER FORMS OF SWINDLING  - RPC Art. 316 as amended by PD 1689` +
+      `BOUNCING CHECK` +
+      `NEW ANTI-CARNAPPING ACT OF 2016 - MC - RA 10883 (repealed RA 6539)`,
+    non_drug_rate = non_drug_total / `GRAND TOTAL`
+  )
+```
+
+------------------------------------------------------------------------
+
+## A.3 Difference-in-Differences (DiD) Estimation
+
+### Dataset Preparation
+
+```{r}
+# Reshape to long format for DiD
+did_data_p <- crime %>%
+  select(Date, drug_rate, non_drug_rate, post) %>%
+  pivot_longer(
+    cols      = c(drug_rate, non_drug_rate),
+    names_to  = "group",
+    values_to = "crime_rate"
+  ) %>%
+  mutate(treat = ifelse(group == "drug_rate", 1, 0))
+```
+
+### DiD Model
+
+```{r}
+did_model_p <- lm(crime_rate ~ treat + post + treat * post,
+                  data = did_data_p)
+summary(did_model_p)
+```
+
+### DiD Plot
+
+```{r, echo=FALSE}
+did <- ggplot(did_data_p, aes(x = Date, y = crime_rate, color = group)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = as.Date("2016-07-01"),
+             linetype = "dashed", color = "black", linewidth = 0.7) +
+  scale_color_manual(
+    values = c("drug_rate" = "#F8766D", "non_drug_rate" = "#00BFC4"),
+    labels = c("drug_rate" = "Drug Crime Rate", "non_drug_rate" = "Non-Drug Crime Rate")
+  ) +
+  labs(title = "Drug vs Non-Drug Crime Rates Over Time",
+       x = "Date", y = "Crime Rate", color = "Group") +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title    = element_text(size = 15, face = "bold", hjust = 0.5),
+    axis.title.x  = element_text(size = 15, face = "bold"),
+    axis.title.y  = element_text(size = 15, face = "bold"),
+    axis.text.x   = element_text(size = 15),
+    axis.text.y   = element_text(size = 15),
+    legend.title  = element_text(size = 15, face = "bold"),
+    legend.text   = element_text(size = 15),
+    plot.margin   = margin(15, 20, 15, 15)
+  )
+
+ggsave("did_plot.png", plot = did, width = 8, height = 5, dpi = 300, bg = "white")
+did
+```
+
+------------------------------------------------------------------------
+
+## A.4 Parallel Trends Assumption Tests
+
+### A.4.1 Pre-Trend Regression Test
+
+```{r}
+# Restrict to pre-treatment period
+pre_data_p <- did_data_p %>%
+  filter(Date < as.Date("2016-07-01")) %>%
+  mutate(time_num = as.numeric(Date))
+
+# Test for differential pre-trends
+pretrend_model_p <- lm(crime_rate ~ treat * time_num, data = pre_data_p)
+summary(pretrend_model_p)
+```
+
+### Pre-Trend Plot
+
+```{r, echo=FALSE}
+p <- ggplot(pre_data_p, aes(x = Date, y = crime_rate, color = group)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(
+    values = c("drug_rate" = "#F8766D", "non_drug_rate" = "#00BFC4"),
+    labels = c("drug_rate" = "Drug Crime Rate", "non_drug_rate" = "Non-Drug Crime Rate"),
+    name   = "Group"
+  ) +
+  labs(title = "Pre-Treatment Trends (Before July 1, 2016)",
+       x = "Date", y = "Crime Rate") +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title   = element_text(size = 15, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 15, face = "bold"),
+    axis.title.y = element_text(size = 15, face = "bold"),
+    axis.text.x  = element_text(size = 15),
+    axis.text.y  = element_text(size = 15),
+    legend.title = element_text(size = 15, face = "bold"),
+    legend.text  = element_text(size = 15)
+  )
+
+ggsave("pretrend_plot.png", plot = p, width = 8, height = 5, dpi = 300, bg = "white")
+p
+```
+
+### A.4.2 Placebo Test
+
+```{r}
+# Use pre-treatment data with a fake intervention date (July 2015)
+placebo_data <- did_data_p %>%
+  filter(Date < as.Date("2016-07-01")) %>%
+  mutate(
+    FakeTreat1 = as.integer(group == "drug_rate" & Date >= as.Date("2015-07-01")),
+    FakeTreat2 = as.integer(group == "drug_rate" & Date == as.Date("2015-07-01"))
+  )
+
+# Estimate placebo effects with two-way fixed effects
+pl_model1 <- feols(crime_rate ~ FakeTreat1 | group + Date, data = placebo_data)
+pl_model2 <- feols(crime_rate ~ FakeTreat2 | group + Date, data = placebo_data)
+
+etable(pl_model1, pl_model2)
+```
+
+```{r}
+# Collect coefficients and confidence intervals for plot
+coef_df <- tibble(
+  Model    = c("FakeTreat1", "FakeTreat2"),
+  Estimate = c(coef(pl_model1)["FakeTreat1"],
+               coef(pl_model2)["FakeTreat2"]),
+  SE       = c(summary(pl_model1)$coeftable["FakeTreat1", "Std. Error"],
+               summary(pl_model2)$coeftable["FakeTreat2", "Std. Error"])
+) %>%
+  mutate(Lower = Estimate - 1.96 * SE,
+         Upper = Estimate + 1.96 * SE)
+
+print(coef_df)
+```
+
+### Placebo Plot
+
+```{r}
+placebo <- ggplot(coef_df, aes(x = Model, y = Estimate)) +
+  geom_point(size = 3, color = "blue") +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Placebo Treatment Effects (Crime Data)",
+       y = "Estimated Effect on Crime Rate",
+       x = "Placebo Treatment") +
+  theme_minimal() +
+  theme(
+    plot.title   = element_text(size = 15, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.x  = element_text(size = 15),
+    axis.text.y  = element_text(size = 15)
+  )
+
+ggsave("placebo_plot.png", plot = placebo, width = 8, height = 5, dpi = 300)
+placebo
+```
+
+------------------------------------------------------------------------
+
+## A.5 Event Study
+
+```{r}
+# Construct July-to-July event-time bins relative to July 2016
+did_data_p_ju <- did_data_p %>%
+  mutate(
+    year_shift = ifelse(month(Date) >= 7, year(Date), year(Date) - 1),
+    event_time = factor(year_shift - 2016)
+  )
+
+# Set baseline to year -1 (July 2015 – June 2016)
+did_data_p_ju$event_time <- relevel(did_data_p_ju$event_time, ref = "-1")
+
+# Event study regression
+event_model_ju <- lm(crime_rate ~ treat * event_time, data = did_data_p_ju)
+summary(event_model_ju)
+```
+
+### Event Study Plot
+
+```{r}
+event_plot_ju <- tidy(event_model_ju) %>%
+  filter(grepl("treat:event_time", term)) %>%
+  mutate(event_time = as.numeric(gsub("treat:event_time", "", term)))
+
+event_study <- ggplot(event_plot_ju, aes(x = event_time, y = estimate)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
+                    ymax = estimate + 1.96 * std.error), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Event Study (Relative to July 1, 2016)",
+       x = "Years Relative to Policy",
+       y = "Effect") +
+  theme_minimal() +
+  theme(
+    plot.title   = element_text(size = 15, face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    axis.text.x  = element_text(size = 15),
+    axis.text.y  = element_text(size = 15)
+  )
+
+ggsave("event_study_plot.png", plot = event_study, width = 8, height = 5, dpi = 300)
+event_study
+```
+
+------------------------------------------------------------------------
+
+
+
+# =============================================================================
+# E-VALUE SENSITIVITY ANALYSIS FOR DiD
+# =============================================================================
+
+## E-Value Input Parameters
+
+```{r}
+est  <- coef(did_model_p)["treat:post"]
+print(est)
+se <- coef(summary(did_model_p))["treat:post", "Std. Error"]
+print(se)
+
+sd_y <- sigma(did_model_p)
+print(sd_y)
+```
+
+## E-Value Results
+
+```{r}
+EValue::evalues.OLS(est = est, se = se, sd = sd_y, delta = 1)
+```
+
+
+## E-Value Contour Plot
+
+```{r}
+# ── 1. Crime DiD model ───────────────────────────────────────────────────────
+did_model_p <- lm(
+  crime_rate ~ treat + post + treat * post,
+  data = did_data_p
+)
+
+# ── 2. Extract DiD coefficient, SE, and residual SD ──────────────────────────
+est  <- coef(did_model_p)["treat:post"]
+se <- coef(summary(did_model_p))["treat:post", "Std. Error"]
+sd_y <- sigma(did_model_p)
+
+# ── 3. Compute E-values ──────────────────────────────────────────────────────
+ev_crime <- EValue::evalues.OLS(
+  est   = est,
+  se    = se,
+  sd    = sd_y,
+  delta = 1
+)
+
+# ── 4. Extract RR and E-values ───────────────────────────────────────────────
+rr_point <- ev_crime["RR", "point"]
+rr_lower <- ev_crime["RR", "lower"]
+
+e_point <- ev_crime["E-values", "point"]
+e_ci    <- ev_crime["E-values", "lower"]
+
+# ── 5. E-value contour function ──────────────────────────────────────────────
+evalue_curve <- function(x, rr) {
+  rr * (x - 1) / (x - rr)
+}
+
+# ── 6. Curve data ────────────────────────────────────────────────────────────
+# Point-estimate contour
+df_point <- data.frame(
+  x = seq(rr_point + 0.0001, 6.0, length.out = 2000)
+)
+df_point$y <- evalue_curve(df_point$x, rr_point)
+df_point <- subset(df_point, y >= 1 & y <= 6)
+
+# CI contour
+df_ci <- data.frame(
+  x = seq(rr_lower + 0.0001, 6.0, length.out = 2000)
+)
+df_ci$y <- evalue_curve(df_ci$x, rr_lower)
+df_ci <- subset(df_ci, y >= 1 & y <= 6)
+
+# ── 7. Labels ────────────────────────────────────────────────────────────────
+point_label <- data.frame(
+  x = e_point,
+  y = e_point,
+  label = sprintf("E-value: (%.3f, %.3f)", e_point, e_point)
+)
+
+ci_label <- data.frame(
+  x = e_ci,
+  y = e_ci,
+  label = sprintf("E-value (CI): (%.3f, %.3f)", e_ci, e_ci)
+)
+
+# ── 8. Plot ──────────────────────────────────────────────────────────────────
+p_crime <- ggplot() +
+  
+  # background
+  annotate(
+    "rect",
+    xmin = 1, xmax = 6,
+    ymin = 1, ymax = 6,
+    fill = "grey80",
+    alpha = 0.30
+  ) +
+  
+  # null line
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed",
+    linewidth = 0.7,
+    color = "grey50"
+  ) +
+  
+  # main E-value contour
+  geom_line(
+    data = df_point,
+    aes(x = x, y = y),
+    color = "#3266AD",
+    linewidth = 1.3
+  ) +
+  
+  # CI contour
+  geom_line(
+    data = df_ci,
+    aes(x = x, y = y),
+    color = "grey55",
+    linewidth = 1.0,
+    linetype = "dashed"
+  ) +
+  
+  # point estimate marker
+  geom_point(
+    data = point_label,
+    aes(x = x, y = y),
+    shape = 21,
+    size = 3,
+    fill = "white",
+    color = "#3266AD",
+    stroke = 1.6
+  ) +
+  
+  # point estimate text
+  geom_text(
+    data = point_label,
+    aes(x = x, y = y, label = label),
+    nudge_x = 0.15,
+    nudge_y = 0.15,
+    hjust = 0,
+    size = 3.8,
+    color = "#3266AD"
+  ) +
+  
+  # CI marker
+  geom_point(
+    data = ci_label,
+    aes(x = x, y = y),
+    shape = 21,
+    size = 3,
+    fill = "white",
+    color = "grey45",
+    stroke = 1.6
+  ) +
+  
+  # CI text
+  geom_text(
+    data = ci_label,
+    aes(x = x, y = y, label = label),
+    nudge_x = 0.15,
+    nudge_y = -0.18,
+    hjust = 0,
+    size = 3.8,
+    color = "grey35"
+  ) +
+  
+  labs(
+    title = "E-value Contour Plot",
+    subtitle = "Anti-Illegal Drugs Campaign DiD Estimate",
+    x = "Confounder–Exposure association (RR scale)",
+    y = "Confounder–Outcome association (RR scale)"
+  ) +
+  
+  coord_cartesian(
+    xlim = c(1, 6),
+    ylim = c(1, 6),
+    clip = "off"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 14,
+      hjust = 0,
+      color = "grey10",
+      margin = margin(b = 4)
+    ),
+    plot.subtitle = element_text(
+      size = 10,
+      hjust = 0,
+      color = "grey45",
+      margin = margin(b = 10)
+    ),
+    axis.title = element_text(
+      face = "bold",
+      size = 11,
+      color = "grey20"
+    ),
+    axis.text = element_text(
+      color = "grey30",
+      size = 10
+    ),
+    axis.line = element_line(
+      color = "grey30",
+      linewidth = 0.4
+    ),
+    panel.grid.major = element_line(
+      color = "grey88",
+      linewidth = 0.35
+    ),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(12, 65, 12, 12)
+  )
+
+p_crime
+
+# Save
+ggsave(
+  "evalue_did_crime_plot.png",
+  plot = p_crime,
+  width = 8,
+  height = 5,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+
+
+
+
+
+
